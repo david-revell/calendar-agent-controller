@@ -1,0 +1,35 @@
+# Python 3.10+
+
+# MCP Server + client
+mcp>=1.6.0
+
+# Google Calendar API stack
+google-auth>=2.39.0
+google-auth-oauthlib>=1.2.1
+google-api-python-client>=2.167.0
+
+# Date parsing
+python-dateutil>=2.9.0
+dateparser>=1.2.0
+
+# OpenAI SDK
+# openai==2.0.0
+openai>=2.8.0
+
+# Agents SDK (Python)
+openai-agents>=0.6.1
+
+# LlamaIndex (required because tracer_config imports openinference instrumentation)
+llama-index>=0.11.0
+llama-index-tools-mcp>=0.1.0
+
+# Phoenix tracing & OpenTelemetry
+openinference-instrumentation-openai>=0.1.35
+# openinference-instrumentation-openai>=0.3.5
+arize-phoenix-otel>=0.4.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp-proto-http==1.27.0
+opentelemetry-instrumentation==0.48b0
+
+# Neo4j exception classes are referenced in tracer_config
+neo4j>=5.20.0
