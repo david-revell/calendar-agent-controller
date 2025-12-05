@@ -148,3 +148,4 @@ else:
         print("⚠️  Warning: Tracer export check failed. Check Tracer configuration.")
 
     print("✅ Phoenix tracer configured and ready")
+

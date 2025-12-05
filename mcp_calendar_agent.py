@@ -90,7 +90,7 @@ async def call_mcp(tool_name: str, args: dict) -> str:
 # ---------------------------------------------------------------------
 # Tools exposed to the Agent (SDK @function_tool)
 # ---------------------------------------------------------------------
-
+@tracer.tool(name="list_calendar_events")
 @function_tool
 async def list_calendar_events(date_start: str, date_end: Optional[str] = None) -> str:
     """
@@ -117,6 +117,7 @@ async def list_calendar_events(date_start: str, date_end: Optional[str] = None) 
             raise
 
 
+@tracer.tool(name="create_calendar_event")
 @function_tool
 async def create_calendar_event(
     summary: str,
@@ -154,6 +155,7 @@ async def create_calendar_event(
             raise
 
 
+@tracer.tool(name="update_calendar_event")
 @function_tool
 async def update_calendar_event(
     event_id: str,
@@ -313,7 +315,7 @@ def simulate_user_turn(
 
 
 # Wrap per-turn reasoning in a chain span for clearer tracing in Phoenix.
-@tracer.chain(name="turn_logic")
+@tracer.agent(name="turn_logic")
 def run_turn_logic(user_input: str, session: SQLiteSession, turn: int):
     # Attach per-turn context to the chain span so it is visible without expanding children.
     span = trace.get_current_span()
