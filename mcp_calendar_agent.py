@@ -340,6 +340,15 @@ def choose_scenario(scenarios: List[Dict[str, str]]) -> Optional[Dict[str, str]]
     return scenarios[0]
 
 
+def save_history(scenario:str,conversation_history: List[Dict[str, str]]):
+    """Save the conversation history to a file."""
+    history_string = f"Scenario: {scenario}\nHistory:\n\n"
+    for turn in conversation_history:
+        history_string += f" - {turn['role']} [{turn['timestamp']}]:\n {turn['content']}\n"
+
+    with open(f"conversation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "w") as f:
+        f.write(history_string)
+
 # @tracer.agent
 @tracer.agent(name="mcp_calender_agent_Attempt4_v3")
 def main():
@@ -398,8 +407,8 @@ def main():
             print(agent_reply)
 
             # Track conversation for the simulator prompt.
-            conversation_history.append({"role": "user", "content": user_input})
-            conversation_history.append({"role": "assistant", "content": agent_reply})
+            conversation_history.append({"role": "user", "content": user_input,"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            conversation_history.append({"role": "assistant", "content": agent_reply,"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
             if turn >= max_turns:
                 print(f"Reached max turns ({max_turns}); stopping.")
@@ -414,6 +423,8 @@ def main():
 
     finally:
         close_fn = getattr(session, "close", None)
+        conversation_history.append({"role": "user", "content": user_input,"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        save_history(scenario,conversation_history)
         if callable(close_fn):
             close_fn()
 
