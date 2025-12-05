@@ -1,23 +1,39 @@
 """
-Google Calendar MCP Agent (v4)
+Google Calendar MCP Agent (v2)
 
 Professional-grade agent built with the OpenAI Agents SDK.
 Uses Phoenix tracing (per-turn spans), an async MCP bridge, and SQLite session
 memory to manage real Google Calendar events via list/create/update tools.
 
 Features:
-- True think → act (tool) → think loop with final JSON output
+- True think -> act (tool) -> think loop with final JSON output
 - Phoenix tracing for reasoning, tool spans, and MCP result previews
 - Per-run session IDs to avoid conversation bleed
-- Natural-language date handling (“tomorrow 3pm”, “next Monday”, ISO8601)
+- Natural-language date handling ("tomorrow 3pm", "next Monday", ISO8601)
 - Full integration with the Google Calendar MCP server in this repo
+- LLM-simulated user driver: reads scenarios from CSV, seeds initial prompt, and
+  auto-generates subsequent user turns with a max-turn cap (no manual stdin)
+
+Version changes:
+- v2: Added LLM-based synthetic user simulator, scenario CSV loader/selector, and max-turn limit; replaced manual stdin loop.
+- v1: Baseline REPL-driven agent with MCP calendar tools and tracing.
+
+Change request:
+"Replace the user input loop with a function that calls an LLM to simulate the user.
+The function takes the scenario, the last agent reply, and the conversation history,
+and returns the next synthetic user message plus a flag indicating whether to continue.
+Store scenarios in a CSV. Add a max-turn cap."
+
 """
 
 import asyncio
-from typing import Optional
+import csv # to load the scenarios CSV
+import json # the simulator LLM returns JSON ({"message":..., "continue":...}).
+import os # to check file existence and read SCENARIO_NAME env var.
+from typing import Optional, Tuple, List, Dict # needed for the typing of simulate_user_turn, load_scenarios, etc.
 from datetime import datetime
 
-from openai import OpenAI  # not strictly needed, but matches qna_agent pattern
+from openai import OpenAI
 from agents import Agent, Runner, function_tool
 from agents.memory.sqlite_session import SQLiteSession
 from mcp.client.stdio import stdio_client
@@ -226,18 +242,80 @@ Final answer format (always):
     tools=[list_calendar_events, create_calendar_event, update_calendar_event],
 )
 
-
 # ---------------------------------------------------------------------
-# Multi-turn REPL entrypoint with session memory
+# Multi-turn loop now driven by an LLM user simulator (no manual stdin)
 # ---------------------------------------------------------------------
 
-EXIT_COMMANDS = {"exit", "quit", "q"}
+SCENARIOS_CSV = "scenarios.csv"
+DEFAULT_MAX_TURNS = 10
+# Model used for the synthetic user simulator; overridable via SIMULATED_USER_MODEL env var.
+SIMULATED_USER_MODEL = os.getenv("SIMULATED_USER_MODEL", "gpt-5-nano")
+
+
+def load_scenarios(csv_path: str) -> List[Dict[str, str]]:
+    """Load scenario rows from CSV so we can drive synthetic conversations."""
+    if not os.path.exists(csv_path):
+        return []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return [row for row in reader if row.get("scenario") and row.get("initial_user_message")]
+
+
+def format_history(history: List[Dict[str, str]]) -> str:
+    """Render a compact text history for the simulator prompt."""
+    lines = []
+    for turn in history:
+        role = turn.get("role", "")
+        content = turn.get("content", "").strip()
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def simulate_user_turn(
+    scenario: str,
+    last_agent_reply: str,
+    conversation_history: List[Dict[str, str]],
+) -> Tuple[str, bool]:
+    """
+    Ask the LLM to produce the next synthetic user message.
+    Returns (message, continue_flag). The continue_flag lets us stop early.
+    """
+    # Keep the simulator focused on the scenario and short outputs.
+    system_prompt = (
+        "You simulate the user in a conversation with a calendar agent. "
+        "Stay consistent with the scenario. If the task is done or blocked, set continue to false."
+    )
+
+    history_text = format_history(conversation_history)
+    user_prompt = (
+        "Respond with JSON: {\"message\": \"<next user message>\", \"continue\": true|false}.\n"
+        f"Scenario: {scenario}\n"
+        f"Agent reply: {last_agent_reply}\n"
+        f"Conversation so far:\n{history_text}"
+    )
+
+    # Some models (e.g., gpt-5-nano) reject non-default temperature; omit it to stay compatible.
+    completion = client.chat.completions.create(
+        model=SIMULATED_USER_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    raw = completion.choices[0].message.content.strip()
+    try:
+        parsed = json.loads(raw)
+        return parsed.get("message", "").strip(), bool(parsed.get("continue", True))
+    except Exception:
+        # If parsing fails, treat the raw text as the message and continue.
+        return raw, True
 
 
 # Wrap per-turn reasoning in a chain span for clearer tracing in Phoenix.
 @tracer.chain(name="turn_logic")
 def run_turn_logic(user_input: str, session: SQLiteSession, turn: int):
-    # Attach per-turn context to the chain span so it’s visible without expanding children.
+    # Attach per-turn context to the chain span so it is visible without expanding children.
     span = trace.get_current_span()
     if span:
         span.set_attribute("turn", turn)
@@ -246,11 +324,36 @@ def run_turn_logic(user_input: str, session: SQLiteSession, turn: int):
     return Runner.run_sync(calendar_agent, user_input, session=session)
 
 
+def choose_scenario(scenarios: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """
+    Pick a scenario by environment variable SCENARIO_NAME, otherwise first row.
+    This keeps selection deterministic for automated runs.
+    """
+    if not scenarios:
+        return None
+    desired = os.getenv("SCENARIO_NAME")
+    if not desired:
+        return scenarios[0]
+    for row in scenarios:
+        if row.get("scenario") == desired:
+            return row
+    return scenarios[0]
+
+
 # @tracer.agent
 @tracer.agent(name="mcp_calender_agent_Attempt4_v3")
 def main():
-    print("\n=== Google Calendar MCP Agent (Attempt 4 v3) ===")
-    print("Type 'exit' to quit.")
+    print("\n=== Google Calendar MCP Agent (LLM-simulated user) ===")
+
+    scenarios = load_scenarios(SCENARIOS_CSV)
+    scenario_row = choose_scenario(scenarios)
+    if not scenario_row:
+        print(f"No scenarios found in {SCENARIOS_CSV}. Add rows with scenario and initial_user_message.")
+        return
+
+    scenario = scenario_row["scenario"]
+    user_input = scenario_row["initial_user_message"]
+    max_turns = int(os.getenv("MAX_TURNS", DEFAULT_MAX_TURNS))
 
     session_id = f"calendar_repl_{datetime.now().strftime('%Y%m%dT%H%M%S')}"
     session = SQLiteSession(session_id=session_id, db_path="chat_history.db")
@@ -258,20 +361,16 @@ def main():
     root_span = trace.get_current_span()
     if root_span:
         root_span.set_attribute("session_id", session_id)
+        # Record which models are in play for downstream observability.
+        root_span.set_attribute("calendar_agent_model", calendar_agent.model)
+        root_span.set_attribute("controller_model", SIMULATED_USER_MODEL)
+        root_span.set_attribute("scenario", scenario)
     turn = 0
+    conversation_history: List[Dict[str, str]] = []
+    continue_flag = True
 
     try:
-        while True:
-            user_input = input("You: ").strip()
-
-            if not user_input:
-                print("No input provided.")
-                continue
-
-            if user_input.lower() in EXIT_COMMANDS:
-                print("Exiting.")
-                break
-
+        while continue_flag and turn < max_turns:
             turn += 1
 
             with tracer.start_as_current_span(
@@ -281,19 +380,38 @@ def main():
                     "turn": turn,
                     "user_input_preview": user_input[:120],
                     "user_input_len": len(user_input),
+                    "scenario": scenario,
                 },
             ):
                 result = run_turn_logic(user_input, session=session, turn=turn)
+                agent_reply = str(result.final_output) if hasattr(result, "final_output") else str(result)
 
                 # Trace final output for Phoenix (per turn)
                 with tracer.start_as_current_span("calendar_agent_final_response") as span:
-                    preview = str(result.final_output)[:200] if hasattr(result, "final_output") else ""
+                    preview = agent_reply[:200]
                     span.set_attribute("user_input", user_input)
                     span.set_attribute("final_output_preview", preview)
                     span.set_attribute("turn", turn)
+                    span.set_attribute("scenario", scenario)
 
-            print("\n=== Agent final_output ===")
-            print(result.final_output)
+            print(f"\n=== Agent final_output (turn {turn}) ===")
+            print(agent_reply)
+
+            # Track conversation for the simulator prompt.
+            conversation_history.append({"role": "user", "content": user_input})
+            conversation_history.append({"role": "assistant", "content": agent_reply})
+
+            if turn >= max_turns:
+                print(f"Reached max turns ({max_turns}); stopping.")
+                break
+
+            # Ask the LLM to produce the next synthetic user turn.
+            user_input, continue_flag = simulate_user_turn(
+                scenario=scenario,
+                last_agent_reply=agent_reply,
+                conversation_history=conversation_history,
+            )
+
     finally:
         close_fn = getattr(session, "close", None)
         if callable(close_fn):

@@ -1,0 +1,4 @@
+scenario,initial_user_message
+follow_up_physical,"I need to book a follow-up physical with Dr. Smith next Thursday afternoon."
+move_meeting,"Can you move my 10am physio appointment on Tuesday to later in the day?"
+double_booking_check,"Please book a blood test tomorrow morning with Nurse Kelly."
