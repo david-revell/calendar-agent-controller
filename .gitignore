@@ -19,6 +19,7 @@ token.json
 *.log
 results/
 archive/
+conversation_history_*
 
 # Editor / OS files
 .cursor/
@@ -29,7 +30,6 @@ Thumbs.db
 # Notebook checkpoints / unused agent versions
 .ipynb_checkpoints/
 mcp_calendar_agent_v*.py
-mcp_calendar_agent_attempt*.py
 
 # SQLite session databases
 *.db

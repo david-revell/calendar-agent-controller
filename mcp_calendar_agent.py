@@ -1,5 +1,5 @@
 """
-Google Calendar MCP Agent (v2)
+Google Calendar MCP Agent (v3)
 
 Professional-grade agent built with the OpenAI Agents SDK.
 Uses Phoenix tracing (per-turn spans), an async MCP bridge, and SQLite session
@@ -15,22 +15,27 @@ Features:
   auto-generates subsequent user turns with a max-turn cap (no manual stdin)
 
 Version changes:
-- v2: Added LLM-based synthetic user simulator, scenario CSV loader/selector, and max-turn limit; replaced manual stdin loop.
+- v3: Added plain-text UTF-8 history export with per-turn timestamps and ensured the final user message is logged exactly once. Minor tracing-decorator cleanup.
+- v2: Introduced LLM-driven synthetic user simulator, scenario CSV loading, and max-turn limit (replacing manual stdin loop).
 - v1: Baseline REPL-driven agent with MCP calendar tools and tracing.
 
-Change request:
-"Replace the user input loop with a function that calls an LLM to simulate the user.
-The function takes the scenario, the last agent reply, and the conversation history,
-and returns the next synthetic user message plus a flag indicating whether to continue.
-Store scenarios in a CSV. Add a max-turn cap."
+
+Change request (v2.1 -> v3):
+"Apply the following minimal fixes to the existing file without changing the overall structure or adding new abstractions:
+1. Fix final-turn logging
+Ensure the last user message is logged once and only if the agent did not process it. Remove any duplicate logging caused by the finally block.
+2. Clean up the history writer
+Keep the history file in the same human-readable plain-text format as the example transcript (user turns as free text, assistant turns as their JSON final_output). Ensure timestamps appear once per turn and in correct order.
+3. Standardise tracing decorators
+Ensure each MCP tool has a single @tracer.tool decorator and the main turn loop has a single @tracer.agent or @tracer.chain decorator. Remove any duplicate or conflicting decorators but do not change the tracing structure beyond this."
 
 """
 
 import asyncio
-import csv # to load the scenarios CSV
-import json # the simulator LLM returns JSON ({"message":..., "continue":...}).
-import os # to check file existence and read SCENARIO_NAME env var.
-from typing import Optional, Tuple, List, Dict # needed for the typing of simulate_user_turn, load_scenarios, etc.
+import csv  # to load the scenarios CSV
+import json  # the simulator LLM returns JSON ({"message":..., "continue":...}).
+import os  # to check file existence and read SCENARIO_NAME env var.
+from typing import Optional, Tuple, List, Dict  # typing for simulate_user_turn, load_scenarios, etc.
 from datetime import datetime
 
 from openai import OpenAI
@@ -90,14 +95,13 @@ async def call_mcp(tool_name: str, args: dict) -> str:
 # ---------------------------------------------------------------------
 # Tools exposed to the Agent (SDK @function_tool)
 # ---------------------------------------------------------------------
-
 @function_tool
 async def list_calendar_events(date_start: str, date_end: Optional[str] = None) -> str:
     """
     List calendar events between date_start and date_end (inclusive).
     Dates can be 'today', 'tomorrow', 'next Monday', '2025-11-26', etc.
     """
-    with tracer.start_as_current_span("tool_list_calendar_events") as span:
+    with tracer.start_as_current_span("list_calendar_events") as span:
         span.set_attribute("date_start", date_start)
         if date_end:
             span.set_attribute("date_end", date_end)
@@ -131,7 +135,7 @@ async def create_calendar_event(
     Datetimes can be ISO8601 or natural language like 'tomorrow 3pm'.
     Attendees is an optional comma-separated list of emails.
     """
-    with tracer.start_as_current_span("tool_create_calendar_event") as span:
+    with tracer.start_as_current_span("create_calendar_event") as span:
         span.set_attribute("summary", summary)
         span.set_attribute("start_datetime", start_datetime)
         span.set_attribute("end_datetime", end_datetime)
@@ -167,7 +171,7 @@ async def update_calendar_event(
     Update an existing calendar event by Google Calendar event_id.
     Any field left as None will be left unchanged.
     """
-    with tracer.start_as_current_span("tool_update_calendar_event") as span:
+    with tracer.start_as_current_span("update_calendar_event") as span:
         span.set_attribute("event_id", event_id)
         if summary:
             span.set_attribute("summary", summary)
@@ -313,7 +317,7 @@ def simulate_user_turn(
 
 
 # Wrap per-turn reasoning in a chain span for clearer tracing in Phoenix.
-@tracer.chain(name="turn_logic")
+@tracer.agent(name="turn_logic")
 def run_turn_logic(user_input: str, session: SQLiteSession, turn: int):
     # Attach per-turn context to the chain span so it is visible without expanding children.
     span = trace.get_current_span()
@@ -340,8 +344,18 @@ def choose_scenario(scenarios: List[Dict[str, str]]) -> Optional[Dict[str, str]]
     return scenarios[0]
 
 
+def save_history(scenario:str,conversation_history: List[Dict[str, str]]):
+    """Save the conversation history to a file."""
+    history_string = f"Scenario: {scenario}\nHistory:\n\n"
+    for turn in conversation_history:
+        history_string += f" - {turn['role']} [{turn['timestamp']}]:\n {turn['content']}\n"
+
+    # Write as UTF-8 so smart quotes/emoji don't get mangled in transcripts.
+    with open(f"conversation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "w", encoding="utf-8") as f:
+        f.write(history_string)
+
 # @tracer.agent
-@tracer.agent(name="mcp_calender_agent_Attempt4_v3")
+@tracer.agent(name="mcp_calender_agent")
 def main():
     print("\n=== Google Calendar MCP Agent (LLM-simulated user) ===")
 
@@ -368,6 +382,7 @@ def main():
     turn = 0
     conversation_history: List[Dict[str, str]] = []
     continue_flag = True
+    unprocessed_final_user: Optional[str] = None
 
     try:
         while continue_flag and turn < max_turns:
@@ -398,8 +413,20 @@ def main():
             print(agent_reply)
 
             # Track conversation for the simulator prompt.
-            conversation_history.append({"role": "user", "content": user_input})
-            conversation_history.append({"role": "assistant", "content": agent_reply})
+            conversation_history.append(
+                {
+                    "role": "user",
+                    "content": user_input,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+            conversation_history.append(
+                {
+                    "role": "assistant",
+                    "content": agent_reply,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
 
             if turn >= max_turns:
                 print(f"Reached max turns ({max_turns}); stopping.")
@@ -411,9 +438,20 @@ def main():
                 last_agent_reply=agent_reply,
                 conversation_history=conversation_history,
             )
+            if not continue_flag:
+                unprocessed_final_user = user_input
 
     finally:
         close_fn = getattr(session, "close", None)
+        if unprocessed_final_user:
+            conversation_history.append(
+                {
+                    "role": "user",
+                    "content": unprocessed_final_user,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        save_history(scenario, conversation_history)
         if callable(close_fn):
             close_fn()
 
