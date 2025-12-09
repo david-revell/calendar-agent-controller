@@ -33,6 +33,8 @@ Change request:
    Extend simulate_user_turn so that when continue=false, it may return {"reason": "..."} and include this reason in the saved history file."
 5. When stopping because of max turns, record a stop reason in the saved history.
 6. Echo each user input to the console before showing the agent output.
+7. Include the scenario in saved log filenames for easier lookup.
+8. Print scenario and session id at run start for quick run identification.
 
 """
 
@@ -366,7 +368,8 @@ def save_history(scenario: str, conversation_history: List[Dict[str, str]], stop
         history_string += f" - {turn['role']} [{turn['timestamp']}]:\n {turn['content']}\n"
 
     # Write as UTF-8 so smart quotes/emoji don't get mangled in transcripts.
-    filename = f"conversation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    safe_scenario = "".join(c if c.isalnum() or c in "-_" else "_" for c in scenario)  # keep filenames shell-safe
+    filename = f"{safe_scenario}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     path = os.path.join("conversation_logs", filename)
     with open(path, "w", encoding="utf-8") as f:
         f.write(history_string)
@@ -387,6 +390,7 @@ def main():
     max_turns = int(os.getenv("MAX_TURNS", DEFAULT_MAX_TURNS))
 
     session_id = f"calendar_repl_{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    print(f"Scenario: {scenario} | Session: {session_id}")  # quick run identifier in console
     session = SQLiteSession(session_id=session_id, db_path="chat_history.db")
     # Add session context to the root agent span for easier filtering in traces.
     root_span = trace.get_current_span()
