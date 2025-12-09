@@ -19,7 +19,7 @@ token.json
 *.log
 results/
 archive/
-conversation_history_*
+conversation_logs/
 
 # Editor / OS files
 .cursor/

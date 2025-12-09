@@ -1,5 +1,5 @@
 """
-Google Calendar MCP Agent (v3)
+Google Calendar MCP Agent (v4 - work in progress)
 
 Professional-grade agent built with the OpenAI Agents SDK.
 Uses Phoenix tracing (per-turn spans), an async MCP bridge, and SQLite session
@@ -7,29 +7,35 @@ memory to manage real Google Calendar events via list/create/update tools.
 
 Features:
 - True think -> act (tool) -> think loop with final JSON output
-- Phoenix tracing for reasoning, tool spans, and MCP result previews
+- Phoenix tracing with clearly named tool spans
 - Per-run session IDs to avoid conversation bleed
-- Natural-language date handling ("tomorrow 3pm", "next Monday", ISO8601)
-- Full integration with the Google Calendar MCP server in this repo
-- LLM-simulated user driver: reads scenarios from CSV, seeds initial prompt, and
-  auto-generates subsequent user turns with a max-turn cap (no manual stdin)
+- Natural-language date handling ("tomorrow 3pm", "next Monday", ISO8601")
+- LLM-driven synthetic user simulator with scenario CSV loader & max-turn cap
+- Plain-text UTF-8 conversation-history export with per-turn timestamps
 
 Version changes:
-- v3: Added plain-text UTF-8 history export with per-turn timestamps and ensured the final user message is logged exactly once. Minor tracing-decorator cleanup.
-- v2: Introduced LLM-driven synthetic user simulator, scenario CSV loading, and max-turn limit (replacing manual stdin loop).
+- v4: To be implemented still.
+- v3: Added UTF-8 history export, per-turn timestamps, and ensured the final user
+      message is logged once. Minor tracing span cleanup.
+- v2: Introduced LLM-driven synthetic user simulator, scenario CSV loading, and
+      max-turn limit (replacing manual stdin loop).
 - v1: Baseline REPL-driven agent with MCP calendar tools and tracing.
 
-
-Change request (v2.1 -> v3):
-"Apply the following minimal fixes to the existing file without changing the overall structure or adding new abstractions:
-1. Fix final-turn logging
-Ensure the last user message is logged once and only if the agent did not process it. Remove any duplicate logging caused by the finally block.
-2. Clean up the history writer
-Keep the history file in the same human-readable plain-text format as the example transcript (user turns as free text, assistant turns as their JSON final_output). Ensure timestamps appear once per turn and in correct order.
-3. Standardise tracing decorators
-Ensure each MCP tool has a single @tracer.tool decorator and the main turn loop has a single @tracer.agent or @tracer.chain decorator. Remove any duplicate or conflicting decorators but do not change the tracing structure beyond this."
+Change request:
+"Apply the following functional improvements without altering overall architecture:
+1. Ensure the final user message is processed once before stopping.
+   If simulate_user_turn returns continue=false, still run the agent on that final user message, record the assistant reply, then end the loop.
+2. Remove the medical-receptionist persona.
+   Replace the instructions block with a neutral description of a general Google Calendar assistant.
+3. Save history files into a dedicated folder.
+   Write all conversation logs into a "conversation_logs/" directory (creating it if missing). Keep the same plain-text format.
+4. Add an optional "reason" field from the synthetic user LLM.
+   Extend simulate_user_turn so that when continue=false, it may return {"reason": "..."} and include this reason in the saved history file."
+5. When stopping because of max turns, record a stop reason in the saved history.
+6. Echo each user input to the console before showing the agent output.
 
 """
+
 
 import asyncio
 import csv  # to load the scenarios CSV
@@ -206,7 +212,8 @@ calendar_agent = Agent(
     name="GoogleCalendarAgent",
     model="gpt-5-nano",
     instructions="""
-You are an autonomous medical receptionist assistant for David's Google Calendar.
+You are a helpful Google Calendar assistant for David. Use the tools to review, create,
+and update events clearly and efficiently.
 
 You have three tools:
 - list_calendar_events(date_start, date_end?)
@@ -222,9 +229,8 @@ Guidelines:
 - When the user wants to SEE events, call list_calendar_events with an appropriate range.
 - When the user wants to CREATE an event:
   - If any essential detail is missing (title, start, end), ask the user to clarify before calling the tool.
-  - If the user has not provided any notes or symptoms for a medical appointment, ask ONCE: "Would you like to add any notes or symptoms to this appointment?"
-  - If the user has not provided a location, you may ask ONCE: "Would you like to specify a location for this appointment?" Do not suggest example location types.
-  - When asking for missing duration or time details, do not propose example options (e.g., do not suggest 30 or 60 minutes); request the info neutrally.
+  - If the user has not provided a location, you may ask ONCE: "Would you like to add a location for this event?"
+  - When asking for missing duration or time details, do not propose example options; request the info neutrally.
   - Assume the user's local timezone for all times; do NOT ask which timezone to use.
   - Before creating, check for conflicts using list_calendar_events for the relevant time/day. Do NOT double-book. If there is a conflict, tell the user it conflicts and propose an alternative nearby free time, then ask for confirmation or another time.
   - Otherwise call create_calendar_event.
@@ -279,10 +285,10 @@ def simulate_user_turn(
     scenario: str,
     last_agent_reply: str,
     conversation_history: List[Dict[str, str]],
-) -> Tuple[str, bool]:
+) -> Tuple[str, bool, Optional[str]]:
     """
     Ask the LLM to produce the next synthetic user message.
-    Returns (message, continue_flag). The continue_flag lets us stop early.
+    Returns (message, continue_flag, stop_reason). The continue_flag lets us stop early.
     """
     # Keep the simulator focused on the scenario and short outputs.
     system_prompt = (
@@ -292,7 +298,8 @@ def simulate_user_turn(
 
     history_text = format_history(conversation_history)
     user_prompt = (
-        "Respond with JSON: {\"message\": \"<next user message>\", \"continue\": true|false}.\n"
+        "Respond with JSON: {\"message\": \"<next user message>\", \"continue\": true|false, "
+        "\"reason\": \"<optional stop reason when continue is false>\"}.\n"
         f"Scenario: {scenario}\n"
         f"Agent reply: {last_agent_reply}\n"
         f"Conversation so far:\n{history_text}"
@@ -310,10 +317,14 @@ def simulate_user_turn(
     raw = completion.choices[0].message.content.strip()
     try:
         parsed = json.loads(raw)
-        return parsed.get("message", "").strip(), bool(parsed.get("continue", True))
+        return (
+            parsed.get("message", "").strip(),
+            bool(parsed.get("continue", True)),
+            parsed.get("reason"),
+        )
     except Exception:
         # If parsing fails, treat the raw text as the message and continue.
-        return raw, True
+        return raw, True, None
 
 
 # Wrap per-turn reasoning in a chain span for clearer tracing in Phoenix.
@@ -344,14 +355,20 @@ def choose_scenario(scenarios: List[Dict[str, str]]) -> Optional[Dict[str, str]]
     return scenarios[0]
 
 
-def save_history(scenario:str,conversation_history: List[Dict[str, str]]):
+def save_history(scenario: str, conversation_history: List[Dict[str, str]], stop_reason: Optional[str] = None):
     """Save the conversation history to a file."""
-    history_string = f"Scenario: {scenario}\nHistory:\n\n"
+    os.makedirs("conversation_logs", exist_ok=True)
+    history_string = f"Scenario: {scenario}\n"
+    if stop_reason:
+        history_string += f"Stop reason: {stop_reason}\n"
+    history_string += "History:\n\n"
     for turn in conversation_history:
         history_string += f" - {turn['role']} [{turn['timestamp']}]:\n {turn['content']}\n"
 
     # Write as UTF-8 so smart quotes/emoji don't get mangled in transcripts.
-    with open(f"conversation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "w", encoding="utf-8") as f:
+    filename = f"conversation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    path = os.path.join("conversation_logs", filename)
+    with open(path, "w", encoding="utf-8") as f:
         f.write(history_string)
 
 # @tracer.agent
@@ -381,12 +398,17 @@ def main():
         root_span.set_attribute("scenario", scenario)
     turn = 0
     conversation_history: List[Dict[str, str]] = []
-    continue_flag = True
-    unprocessed_final_user: Optional[str] = None
+    next_user_input: Optional[str] = user_input
+    final_turn = False
+    stop_reason: Optional[str] = None
 
     try:
-        while continue_flag and turn < max_turns:
+        while turn < max_turns and next_user_input is not None:
+            user_input = next_user_input
             turn += 1
+
+            print(f"\n=== User input (turn {turn}) ===")
+            print(user_input)
 
             with tracer.start_as_current_span(
                 "calendar_turn",
@@ -428,30 +450,27 @@ def main():
                 }
             )
 
+            if final_turn:
+                break
             if turn >= max_turns:
+                stop_reason = stop_reason or f"Reached max turns ({max_turns})"
                 print(f"Reached max turns ({max_turns}); stopping.")
                 break
 
             # Ask the LLM to produce the next synthetic user turn.
-            user_input, continue_flag = simulate_user_turn(
+            user_input, continue_flag, reason = simulate_user_turn(
                 scenario=scenario,
                 last_agent_reply=agent_reply,
                 conversation_history=conversation_history,
             )
+            next_user_input = user_input
             if not continue_flag:
-                unprocessed_final_user = user_input
+                final_turn = True
+                stop_reason = reason
 
     finally:
         close_fn = getattr(session, "close", None)
-        if unprocessed_final_user:
-            conversation_history.append(
-                {
-                    "role": "user",
-                    "content": unprocessed_final_user,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
-        save_history(scenario, conversation_history)
+        save_history(scenario, conversation_history, stop_reason=stop_reason)
         if callable(close_fn):
             close_fn()
 

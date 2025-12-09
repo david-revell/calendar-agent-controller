@@ -1,4 +1,9 @@
 scenario,initial_user_message
+quick_stop,"Please list my events for today."
+test_event_end,"Can you set up a test event for tomorrow at 10am?"
+assistant_intro,"Before we start, what kind of assistant are you?"
+morning_schedule,"What meetings do I have tomorrow morning?"
+quick_check_in,"Hi, I just need a quick acknowledgement."
 follow_up_physical,"I need to book a follow-up physical with Dr. Smith next Thursday afternoon."
 move_meeting,"Can you move my 10am physio appointment on Tuesday to later in the day?"
 double_booking_check,"Please book a blood test tomorrow morning with Nurse Kelly."
