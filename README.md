@@ -88,13 +88,26 @@ This repository assumes that background and focuses only on evaluation behaviour
 
 ## How to run
 
-1. Clone this repository and the Google Calendar MCP Agent repository.
-2. Set the required environment variables (OpenAI key, Phoenix configuration).
+1. Clone this repository:
+   ```
+   git clone <this-repo-url>
+   ```
+
+2. Set the required environment variables:
+   - OpenAI API key  
+   - Phoenix configuration (if tracing is enabled)
+
 3. Define evaluation scenarios in `scenarios.csv`.
-4. Run the controller script to execute a scenario-driven evaluation loop.
-5. Inspect:
-   - conversation logs in `conversation_logs/`
-   - traces in the Phoenix UI.
+
+4. Run the evaluation loop for a specific scenario.  
+   For example, to run the scenario called `off_scope_wifi`:
+   ```
+   $env:SCENARIO_NAME="off_scope_wifi"; python mcp_calendar_agent.py
+   ```
+
+5. Inspect the outputs:
+   - Conversation logs in `conversation_logs/`
+   - Traces in the Phoenix UI
 
 No UI is provided; evaluation is performed via logs and traces.
 
