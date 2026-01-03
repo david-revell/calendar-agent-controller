@@ -17,7 +17,6 @@ load_dotenv()
 # Load environment variables
 ENV = os.getenv("ENV", "dev")
 PHOENIX_API_KEY = os.getenv("PHOENIX_API_KEY")
-print("PHOENIX_API_KEY: ",PHOENIX_API_KEY[:5]+"..")
 DISABLE_TRACING = os.getenv("DISABLE_TRACING", "").lower() in {"1", "true", "yes", "on"}
 PHOENIX_HOSTNAME = os.getenv("PHOENIX_HOSTNAME", "https://app.phoenix.arize.com/s/Palete_production")
 
